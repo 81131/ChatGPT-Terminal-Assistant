@@ -10,19 +10,31 @@ import asyncio
 from prompt_toolkit.application import Application
 from prompt_toolkit.application.current import get_app
 from prompt_toolkit.key_binding import KeyBindings
-from prompt_toolkit.layout import HSplit, Layout, Window
-from prompt_toolkit.layout.controls import FormattedTextControl
-from prompt_toolkit.layout.dimension import D
-from prompt_toolkit.layout.margins import ScrollbarMargin
+from prompt_toolkit.layout import HSplit, Layout
 from prompt_toolkit.widgets import TextArea, Frame, Label
 from prompt_toolkit.styles import Style
-from prompt_toolkit.formatted_text import ANSI
+from prompt_toolkit.formatted_text import ANSI, to_formatted_text
+from prompt_toolkit.lexers.base import Lexer
 
 from rich.console import Console
 from rich.markdown import Markdown
 
 
-# OpenAI API Call
+# ANSI Escape Lexer (CORRECT IMPLEMENTATION)
+class AnsiEscapeLexer(Lexer):
+    def lex_document(self, document):
+        lines = document.text.splitlines()
+
+        def get_line(lineno):
+            if lineno >= len(lines):
+                return []
+            # Convert ANSI -> fragment list (REQUIRED)
+            return to_formatted_text(ANSI(lines[lineno]))
+
+        return get_line
+
+
+# OpenAI API
 chatContent = []
 
 def call_chat(prompt, model):
@@ -30,22 +42,23 @@ def call_chat(prompt, model):
         from openai import OpenAI
         client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-        if chatContent == None:
-            chatContent.append({"role": "user", "content": prompt, "promptID": 1})
-        else:
-            chatContent.append({"role": "user", "content": prompt, "promptID": len(chatContent)+1})
+        chatContent.append({
+            "role": "user",
+            "content": prompt,
+            "promptID": len(chatContent) + 1
+        })
 
         resp = client.chat.completions.create(
             model=model,
             messages=chatContent,
         )
         return resp.choices[0].message.content
+
     except Exception as err:
         return f"OpenAI error: {err}"
 
 
-
-# Predefined ANSI Colors
+# ANSI Theme
 NEON_RED   = "\x1b[38;2;255;60;60m"
 NEON_GREEN = "\x1b[38;2;0;255;140m"
 NEON_BLUE  = "\x1b[38;2;0;210;255m"
@@ -54,45 +67,37 @@ DIM        = "\x1b[2m"
 RESET      = "\x1b[0m"
 
 
-# Markdown to ANSI function
-def md_to_ansi(text):
+
+# Markdown to ANSI
+def md_to_ansi(text: str) -> str:
     buf = io.StringIO()
     Console(
         file=buf,
         force_terminal=True,
         color_system="truecolor",
-        width=100
+        width=100,
     ).print(Markdown(text, code_theme="monokai"))
     return buf.getvalue()
 
 
-# Output management
-output_text = ""
+# Output Area (Scrollable + ANSI-rendered)
+output_area = TextArea(
+    text="",
+    lexer=AnsiEscapeLexer(),
+    read_only=False,
+    wrap_lines=True,
+    scrollbar=True,
+    focusable=True,
+)
 
-def append_output(ansi_chunk):
-    global output_text
-    output_text += ansi_chunk
-    output_control.text = ANSI(output_text)
+def append_output(ansi_text: str):
+    buf = output_area.buffer
+    buf.insert_text(ansi_text)
+    buf.cursor_down(count=10**6)
     get_app().invalidate()
 
 
-# Output Window (ANSI-aware)
-output_control = FormattedTextControl(
-    text=ANSI(""),
-    focusable=True,
-    show_cursor=True,
-)
-
-output_window = TextArea(
-    content=output_control,
-    wrap_lines=True,
-    right_margins=[ScrollbarMargin(display_arrows=True)],
-    height=D(weight=1),
-)
-
-# ──────────────────────────────────────────────
 # Input Area
-# ──────────────────────────────────────────────
 input_area = TextArea(
     height=5,
     prompt=ANSI(f"{NEON_RED}●{RESET} "),
@@ -100,6 +105,9 @@ input_area = TextArea(
     wrap_lines=True,
 )
 
+
+
+# UI Elements
 title = Label(
     ANSI(
         f"{NEON_BLUE}➤ {NEON_PINK}ChatGPT Terminal{RESET} "
@@ -112,15 +120,14 @@ status = Label(ANSI(f"{NEON_GREEN}Status:{RESET} Ready"))
 layout = Layout(
     HSplit([
         Frame(title),
-        Frame(output_window, title=ANSI(f"{NEON_PINK}➤ [Response]{RESET}")),
+        Frame(output_area, title=ANSI(f"{NEON_PINK}➤ [Response]{RESET}")),
         Frame(input_area, title=ANSI(f"{NEON_RED}➤ [Prompt]{RESET}")),
         status,
     ])
 )
 
-# ──────────────────────────────────────────────
+
 # Key Bindings
-# ──────────────────────────────────────────────
 kb = KeyBindings()
 
 @kb.add("enter")
@@ -135,9 +142,8 @@ def newline(event):
 def quit_(event):
     event.app.exit()
 
-# ──────────────────────────────────────────────
+
 # Chat Logic
-# ──────────────────────────────────────────────
 async def handle_send():
     prompt = input_area.text.strip()
     if not prompt:
